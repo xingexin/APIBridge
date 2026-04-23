@@ -12,6 +12,8 @@ type Config struct {
 	Upstream UpstreamConfig `mapstructure:"upstream"`
 	Rust     RustConfig     `mapstructure:"rust"`
 	OpenAI   OpenAIConfig   `mapstructure:"openai"`
+	Database DatabaseConfig `mapstructure:"database"`
+	Billing  BillingConfig  `mapstructure:"billing"`
 }
 
 // ServerConfig 表示 HTTP 服务配置。
@@ -33,6 +35,46 @@ type RustConfig struct {
 type OpenAIConfig struct {
 	BaseURL string `mapstructure:"base_url"`
 	APIKey  string `mapstructure:"api_key"`
+}
+
+// DatabaseConfig 表示数据库配置。
+type DatabaseConfig struct {
+	DSN string `mapstructure:"dsn"`
+}
+
+// BillingConfig 表示计费配置。
+type BillingConfig struct {
+	Enabled                 bool                    `mapstructure:"enabled"`
+	RequireAPIKey           bool                    `mapstructure:"require_api_key"`
+	DefaultModel            string                  `mapstructure:"default_model"`
+	DefaultInputPricePer1K  float64                 `mapstructure:"default_input_price_per_1k"`
+	DefaultOutputPricePer1K float64                 `mapstructure:"default_output_price_per_1k"`
+	RequestPrice            float64                 `mapstructure:"request_price"`
+	SeedAccounts            []BillingAccountConfig  `mapstructure:"seed_accounts"`
+	Models                  map[string]ModelPricing `mapstructure:"models"`
+}
+
+// BillingAccountConfig 表示需要初始化的计费账号。
+type BillingAccountConfig struct {
+	AccountID string                `mapstructure:"account_id"`
+	Name      string                `mapstructure:"name"`
+	Balance   float64               `mapstructure:"balance"`
+	Enabled   bool                  `mapstructure:"enabled"`
+	APIKeys   []BillingAPIKeyConfig `mapstructure:"api_keys"`
+}
+
+// BillingAPIKeyConfig 表示账号下的平台 API Key。
+type BillingAPIKeyConfig struct {
+	Key     string `mapstructure:"key"`
+	Name    string `mapstructure:"name"`
+	Enabled bool   `mapstructure:"enabled"`
+}
+
+// ModelPricing 表示模型计费单价。
+type ModelPricing struct {
+	InputPricePer1K  float64 `mapstructure:"input_price_per_1k"`
+	OutputPricePer1K float64 `mapstructure:"output_price_per_1k"`
+	RequestPrice     float64 `mapstructure:"request_price"`
 }
 
 // Load 读取配置文件，并允许环境变量覆盖。
@@ -69,4 +111,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("rust.grpc_addr", "127.0.0.1:50051")
 	v.SetDefault("openai.base_url", "https://api.openai.com")
 	v.SetDefault("openai.api_key", "")
+	v.SetDefault("database.dsn", "gptbridge:password@tcp(127.0.0.1:3306)/gptbridge?charset=utf8mb4&parseTime=True&loc=Local")
+	v.SetDefault("billing.enabled", true)
+	v.SetDefault("billing.require_api_key", true)
+	v.SetDefault("billing.default_model", "default")
+	v.SetDefault("billing.default_input_price_per_1k", 0.001)
+	v.SetDefault("billing.default_output_price_per_1k", 0.002)
+	v.SetDefault("billing.request_price", 0)
 }

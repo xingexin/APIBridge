@@ -15,6 +15,7 @@ const (
 	operationResponse       proxyOperation = "response"
 	operationImageGenerate  proxyOperation = "image_generation"
 	operationImageEdit      proxyOperation = "image_edit"
+	operationProxy          proxyOperation = "proxy"
 )
 
 // proxyCaller 表示具体的下游调用函数。
@@ -27,6 +28,7 @@ func (r *Router) buildDispatchTable() map[proxyOperation]proxyCaller {
 		operationResponse:       r.callResponse,
 		operationImageGenerate:  r.callImageGeneration,
 		operationImageEdit:      r.callImageEdit,
+		operationProxy:          r.callProxy,
 	}
 }
 
@@ -47,5 +49,10 @@ func (r *Router) callImageGeneration(c *gin.Context, req entity.ProxyRequest) (*
 
 // callImageEdit 调用图片编辑处理函数。
 func (r *Router) callImageEdit(c *gin.Context, req entity.ProxyRequest) (*http.Response, error) {
+	return r.proxy.Forward(c.Request.Context(), req)
+}
+
+// callProxy 调用通用代理处理函数。
+func (r *Router) callProxy(c *gin.Context, req entity.ProxyRequest) (*http.Response, error) {
 	return r.proxy.Forward(c.Request.Context(), req)
 }

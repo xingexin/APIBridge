@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"time"
 
 	"GPTBridge/internal/domain/proxy/repository"
 	proxyservice "GPTBridge/internal/domain/proxy/service"
+	walletrepository "GPTBridge/internal/domain/wallet/repository"
+	walletservice "GPTBridge/internal/domain/wallet/service"
 	"GPTBridge/internal/handler"
 	"GPTBridge/internal/infra/config"
 	"GPTBridge/internal/infra/logging"
@@ -13,6 +16,8 @@ import (
 	"GPTBridge/internal/infra/rustbridge"
 
 	"go.uber.org/zap"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 )
 
 // main 启动代理服务并挂载 Rust 桥接客户端。
@@ -30,10 +35,23 @@ func main() {
 		logger.Fatal("读取配置失败", zap.Error(err))
 	}
 
+	db, err := gorm.Open(mysql.Open(cfg.Database.DSN), &gorm.Config{})
+	if err != nil {
+		logger.Fatal("打开数据库失败", zap.Error(err))
+	}
+	if err := walletrepository.AutoMigrate(db); err != nil {
+		logger.Fatal("数据库迁移失败", zap.Error(err))
+	}
+	walletRepository := walletrepository.NewGormWalletRepository(db)
+	if err := walletRepository.SeedAccounts(context.Background(), cfg.Billing.SeedAccounts); err != nil {
+		logger.Fatal("初始化计费账号失败", zap.Error(err))
+	}
+
 	bridgeClient := newBridge(cfg, logger)
+	billingService := walletservice.NewBillingService(cfg.Billing, walletRepository, logger)
 
 	proxyService := proxyservice.NewProxyService(bridgeClient, logger)
-	httpHandler := handler.NewRouter(proxyService, logger)
+	httpHandler := handler.NewRouter(proxyService, billingService, logger)
 
 	server := &http.Server{
 		Addr:              cfg.Server.ListenAddr,

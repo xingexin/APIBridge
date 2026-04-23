@@ -35,6 +35,8 @@ Go 发给 Rust 的请求字段：
 ```json
 {
   "operation": "chat_completion",
+  "method": "POST",
+  "path": "/v1/chat/completions",
   "headers": {
     "Authorization": "Bearer xxx",
     "X-Trace-Id": "trace-id"
@@ -52,6 +54,7 @@ Go 发给 Rust 的请求字段：
 - `file_upload`
 - `models`
 - `health`
+- `proxy`
 
 ## 响应流结构
 

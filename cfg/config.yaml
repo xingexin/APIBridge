@@ -10,3 +10,28 @@ rust:
 openai:
   base_url: "https://api.openai.com"
   api_key: ""
+
+database:
+  dsn: "gptbridge:password@tcp(127.0.0.1:3306)/gptbridge?charset=utf8mb4&parseTime=True&loc=Local"
+
+billing:
+  enabled: true
+  require_api_key: true
+  default_model: "default"
+  default_input_price_per_1k: 0.001
+  default_output_price_per_1k: 0.002
+  request_price: 0
+  seed_accounts:
+    - account_id: "local-dev"
+      name: "local-dev"
+      balance: 100
+      enabled: true
+      api_keys:
+        - key: "sk-local-dev"
+          name: "local-dev-key"
+          enabled: true
+  models:
+    default:
+      input_price_per_1k: 0.001
+      output_price_per_1k: 0.002
+      request_price: 0

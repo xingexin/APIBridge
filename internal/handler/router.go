@@ -1,11 +1,14 @@
 package handler
 
 import (
+	"bytes"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	proxyservice "GPTBridge/internal/domain/proxy/service"
+	walletservice "GPTBridge/internal/domain/wallet/service"
 	"GPTBridge/internal/infra/logging"
 	"GPTBridge/internal/infra/trace"
 	"github.com/gin-gonic/gin"
@@ -15,22 +18,24 @@ import (
 // Router 负责注册对外 HTTP 路由并调用代理服务。
 type Router struct {
 	proxy      *proxyservice.ProxyService
+	billing    *walletservice.BillingService
 	engine     *gin.Engine
 	dispatcher map[proxyOperation]proxyCaller
 	logger     *zap.Logger
 }
 
 // NewRouter 创建基于 Gin 的路由入口。
-func NewRouter(proxy *proxyservice.ProxyService, logger *zap.Logger) http.Handler {
+func NewRouter(proxy *proxyservice.ProxyService, billing *walletservice.BillingService, logger *zap.Logger) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 
 	router := &Router{
-		proxy:  proxy,
-		engine: gin.New(),
-		logger: logger,
+		proxy:   proxy,
+		billing: billing,
+		engine:  gin.New(),
+		logger:  logger,
 	}
 	router.dispatcher = router.buildDispatchTable()
-	router.engine.Use(router.traceMiddleware(), router.accessLogMiddleware(), gin.Recovery())
+	router.engine.Use(router.traceMiddleware(), router.billingMiddleware(), router.accessLogMiddleware(), gin.Recovery())
 	router.registerRoutes()
 	return router.engine
 }
@@ -43,6 +48,7 @@ func (r *Router) registerRoutes() {
 	r.engine.POST("/v1/images/generations", r.handleImageGenerations)
 	r.engine.POST("/v1/images/edits", r.handleImageEdits)
 	r.engine.GET("/v1/models", r.handleModels)
+	r.engine.NoRoute(r.handleNoRoute)
 }
 
 // handleHealth 处理健康检查请求。
@@ -86,6 +92,15 @@ func (r *Router) handleModels(c *gin.Context) {
 	c.Data(http.StatusOK, "application/json", models)
 }
 
+// handleNoRoute 将未显式注册的 /v1 请求走通用代理。
+func (r *Router) handleNoRoute(c *gin.Context) {
+	if strings.HasPrefix(c.Request.URL.Path, "/v1/") {
+		r.forwardToBridge(c, operationProxy)
+		return
+	}
+	writeError(c, http.StatusNotFound, http.ErrNoLocation)
+}
+
 // writeError 输出统一的桥接错误响应。
 func writeError(c *gin.Context, status int, err error) {
 	c.JSON(status, map[string]any{
@@ -96,15 +111,28 @@ func writeError(c *gin.Context, status int, err error) {
 	})
 }
 
-// copyResponse 原样写回 Rust 桥接服务的响应。
-func copyResponse(c *gin.Context, resp *http.Response) {
+// copyResponse 原样写回上游响应，并在响应结束后执行计费。
+func (r *Router) copyResponse(c *gin.Context, resp *http.Response, requestBody []byte) {
 	for key, values := range resp.Header {
 		for _, value := range values {
 			c.Writer.Header().Add(key, value)
 		}
 	}
 	c.Status(resp.StatusCode)
-	_, _ = io.Copy(c.Writer, resp.Body)
+
+	var captured bytes.Buffer
+	_, _ = copyAndFlush(c.Writer, io.TeeReader(resp.Body, &captured))
+
+	if resp.StatusCode >= http.StatusBadRequest || r.billing == nil || !r.billing.Enabled() {
+		return
+	}
+	account, ok := walletservice.AccountFromContext(c.Request.Context())
+	if !ok {
+		return
+	}
+	if _, err := r.billing.Charge(c.Request.Context(), account, requestBody, captured.Bytes()); err != nil {
+		logging.WithContext(r.logger, c.Request.Context()).Error("请求计费失败", zap.Error(err))
+	}
 }
 
 // traceMiddleware 为每个请求准备 traceID 并写入上下文。
@@ -114,6 +142,31 @@ func (r *Router) traceMiddleware() gin.HandlerFunc {
 		c.Request.Header.Set(trace.HeaderTraceID, traceID)
 		c.Writer.Header().Set(trace.HeaderTraceID, traceID)
 		c.Request = c.Request.WithContext(trace.WithTraceID(c.Request.Context(), traceID))
+		c.Next()
+	}
+}
+
+// billingMiddleware 校验平台 API Key，并把账号写入上下文。
+func (r *Router) billingMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if r.billing == nil || !r.billing.RequireAPIKey() || !strings.HasPrefix(c.Request.URL.Path, "/v1/") {
+			c.Next()
+			return
+		}
+
+		account, err := r.billing.Authenticate(c.Request.Header)
+		if err != nil {
+			status := http.StatusUnauthorized
+			if err == walletservice.ErrInsufficientBalance {
+				status = http.StatusPaymentRequired
+			}
+			writeError(c, status, err)
+			c.Abort()
+			return
+		}
+
+		c.Writer.Header().Set("X-Billing-Account", account.Name)
+		c.Request = c.Request.WithContext(walletservice.WithAccount(c.Request.Context(), account))
 		c.Next()
 	}
 }
@@ -131,5 +184,27 @@ func (r *Router) accessLogMiddleware() gin.HandlerFunc {
 			zap.String("client_ip", c.ClientIP()),
 			zap.Duration("latency", time.Since(start)),
 		)
+	}
+}
+
+func copyAndFlush(writer gin.ResponseWriter, reader io.Reader) (int64, error) {
+	buf := make([]byte, 32*1024)
+	var written int64
+	for {
+		n, readErr := reader.Read(buf)
+		if n > 0 {
+			writeN, writeErr := writer.Write(buf[:n])
+			written += int64(writeN)
+			writer.Flush()
+			if writeErr != nil {
+				return written, writeErr
+			}
+		}
+		if readErr == io.EOF {
+			return written, nil
+		}
+		if readErr != nil {
+			return written, readErr
+		}
 	}
 }

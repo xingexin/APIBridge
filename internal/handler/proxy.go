@@ -53,7 +53,7 @@ func (r *Router) forwardToBridge(c *gin.Context, operation proxyOperation) {
 		zap.String("operation", string(operation)),
 		zap.Int("status", resp.StatusCode),
 	)
-	copyResponse(c, resp)
+	r.copyResponse(c, resp, payload)
 }
 
 // requestPath 返回客户端原始请求路径。

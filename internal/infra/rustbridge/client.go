@@ -66,7 +66,7 @@ func NewClient(cfg Config, logger *zap.Logger) *Client {
 
 // Forward 调用 Rust RPC 服务。
 func (c *Client) Forward(ctx context.Context, req entity.ProxyRequest) (*http.Response, error) {
-	return c.stream(ctx, req.Operation, req.Payload, http.Header(req.Headers))
+	return c.stream(ctx, req.Operation, req.Method, req.Path, req.Payload, http.Header(req.Headers))
 }
 
 // UploadFile 调用 Rust 的文件上传接口。
@@ -95,7 +95,7 @@ func (c *Client) UploadFile(ctx context.Context, filename string, contentType st
 		nextHeaders.Set("X-File-Content-Type", contentType)
 	}
 
-	resp, err := c.stream(ctx, operationFileUpload, body.Bytes(), nextHeaders)
+	resp, err := c.stream(ctx, operationFileUpload, http.MethodPost, "/v1/files", body.Bytes(), nextHeaders)
 	if err != nil {
 		return entity.FileUploadResponse{}, err
 	}
@@ -110,7 +110,7 @@ func (c *Client) UploadFile(ctx context.Context, filename string, contentType st
 
 // Models 获取 Rust 返回的模型列表。
 func (c *Client) Models(ctx context.Context, headers http.Header) (entity.ModelListResponse, error) {
-	resp, err := c.stream(ctx, operationModels, nil, headers)
+	resp, err := c.stream(ctx, operationModels, http.MethodGet, "/v1/models", nil, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +130,7 @@ func (c *Client) Health(ctx context.Context, accountID string, headers http.Head
 		return entity.HealthResponse{}, err
 	}
 
-	resp, err := c.stream(ctx, operationHealth, payload, headers)
+	resp, err := c.stream(ctx, operationHealth, http.MethodPost, "/health", payload, headers)
 	if err != nil {
 		return entity.HealthResponse{}, err
 	}
@@ -144,8 +144,8 @@ func (c *Client) Health(ctx context.Context, accountID string, headers http.Head
 }
 
 // stream 调用 Rust 的 server-stream RPC，并包装成 http.Response 交给上层透传。
-func (c *Client) stream(ctx context.Context, operation string, payload []byte, headers http.Header) (*http.Response, error) {
-	request, err := c.buildRequest(operation, payload, headers)
+func (c *Client) stream(ctx context.Context, operation string, method string, requestPath string, payload []byte, headers http.Header) (*http.Response, error) {
+	request, err := c.buildRequest(operation, method, requestPath, payload, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -226,9 +226,11 @@ func (c *Client) copyStream(ctx context.Context, operation string, stream grpc.C
 }
 
 // buildRequest 构造通用 RPC 请求。
-func (c *Client) buildRequest(operation string, payload []byte, headers http.Header) (*structpb.Struct, error) {
+func (c *Client) buildRequest(operation string, method string, requestPath string, payload []byte, headers http.Header) (*structpb.Struct, error) {
 	values := map[string]any{
 		"operation":   operation,
+		"method":      method,
+		"path":        requestPath,
 		"headers":     selectedHeaders(headers),
 		"body_base64": base64.StdEncoding.EncodeToString(payload),
 	}

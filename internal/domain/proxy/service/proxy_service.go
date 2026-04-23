@@ -1,0 +1,69 @@
+package biz
+
+import (
+	"context"
+	"io"
+	"net/http"
+
+	"GPTBridge/internal/domain/proxy/entity"
+	"GPTBridge/internal/domain/proxy/repository"
+	"GPTBridge/internal/infra/logging"
+	"go.uber.org/zap"
+)
+
+// ProxyService 负责调用 Rust 服务。
+type ProxyService struct {
+	bridge repository.Bridge
+	logger *zap.Logger
+}
+
+// NewProxyService 创建 ProxyService。
+func NewProxyService(bridge repository.Bridge, logger *zap.Logger) *ProxyService {
+	return &ProxyService{bridge: bridge, logger: logger}
+}
+
+// ChatCompletion 调用 Rust 的聊天接口。
+func (s *ProxyService) ChatCompletion(ctx context.Context, payload []byte, headers http.Header) (*http.Response, error) {
+	logging.WithContext(s.logger, ctx).Debug("调用聊天接口", zap.Int("payload_bytes", len(payload)))
+	return s.bridge.ChatCompletion(ctx, payload, headers)
+}
+
+// Response 调用 Rust 的 responses 接口。
+func (s *ProxyService) Response(ctx context.Context, payload []byte, headers http.Header) (*http.Response, error) {
+	logging.WithContext(s.logger, ctx).Debug("调用 responses 接口", zap.Int("payload_bytes", len(payload)))
+	return s.bridge.Response(ctx, payload, headers)
+}
+
+// ImageGeneration 调用 Rust 的图片生成接口。
+func (s *ProxyService) ImageGeneration(ctx context.Context, payload []byte, headers http.Header) (*http.Response, error) {
+	logging.WithContext(s.logger, ctx).Debug("调用图片生成接口", zap.Int("payload_bytes", len(payload)))
+	return s.bridge.ImageGeneration(ctx, payload, headers)
+}
+
+// ImageEdit 调用 Rust 的图片编辑接口。
+func (s *ProxyService) ImageEdit(ctx context.Context, payload []byte, headers http.Header) (*http.Response, error) {
+	logging.WithContext(s.logger, ctx).Debug("调用图片编辑接口", zap.Int("payload_bytes", len(payload)))
+	return s.bridge.ImageEdit(ctx, payload, headers)
+}
+
+// UploadFile 调用 Rust 的文件上传接口。
+func (s *ProxyService) UploadFile(ctx context.Context, filename string, contentType string, content io.Reader, purpose string, headers http.Header) (entity.FileUploadResponse, error) {
+	logging.WithContext(s.logger, ctx).Debug("调用文件上传接口",
+		zap.String("filename", filename),
+		zap.String("content_type", contentType),
+		zap.String("purpose", purpose),
+	)
+	return s.bridge.UploadFile(ctx, filename, contentType, content, purpose, headers)
+}
+
+// Models 获取 Rust 返回的模型列表。
+func (s *ProxyService) Models(ctx context.Context, headers http.Header) (entity.ModelListResponse, error) {
+	logging.WithContext(s.logger, ctx).Debug("获取模型列表")
+	return s.bridge.Models(ctx, headers)
+}
+
+// Health 获取 Rust 服务的健康状态。
+func (s *ProxyService) Health(ctx context.Context, accountID string, headers http.Header) (entity.HealthResponse, error) {
+	logging.WithContext(s.logger, ctx).Debug("获取健康状态", zap.String("account_id", accountID))
+	return s.bridge.Health(ctx, accountID, headers)
+}

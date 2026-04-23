@@ -22,17 +22,29 @@ type proxyCaller func(*gin.Context, []byte, http.Header) (*http.Response, error)
 // buildDispatchTable 构建操作和调用函数的映射关系。
 func (r *Router) buildDispatchTable() map[proxyOperation]proxyCaller {
 	return map[proxyOperation]proxyCaller{
-		operationChatCompletion: func(c *gin.Context, payload []byte, headers http.Header) (*http.Response, error) {
-			return r.proxy.ChatCompletion(c.Request.Context(), payload, headers)
-		},
-		operationResponse: func(c *gin.Context, payload []byte, headers http.Header) (*http.Response, error) {
-			return r.proxy.Response(c.Request.Context(), payload, headers)
-		},
-		operationImageGenerate: func(c *gin.Context, payload []byte, headers http.Header) (*http.Response, error) {
-			return r.proxy.ImageGeneration(c.Request.Context(), payload, headers)
-		},
-		operationImageEdit: func(c *gin.Context, payload []byte, headers http.Header) (*http.Response, error) {
-			return r.proxy.ImageEdit(c.Request.Context(), payload, headers)
-		},
+		operationChatCompletion: r.callChatCompletion,
+		operationResponse:       r.callResponse,
+		operationImageGenerate:  r.callImageGeneration,
+		operationImageEdit:      r.callImageEdit,
 	}
+}
+
+// callChatCompletion 调用聊天补全处理函数。
+func (r *Router) callChatCompletion(c *gin.Context, payload []byte, headers http.Header) (*http.Response, error) {
+	return r.proxy.ChatCompletion(c.Request.Context(), payload, headers)
+}
+
+// callResponse 调用 responses 处理函数。
+func (r *Router) callResponse(c *gin.Context, payload []byte, headers http.Header) (*http.Response, error) {
+	return r.proxy.Response(c.Request.Context(), payload, headers)
+}
+
+// callImageGeneration 调用图片生成处理函数。
+func (r *Router) callImageGeneration(c *gin.Context, payload []byte, headers http.Header) (*http.Response, error) {
+	return r.proxy.ImageGeneration(c.Request.Context(), payload, headers)
+}
+
+// callImageEdit 调用图片编辑处理函数。
+func (r *Router) callImageEdit(c *gin.Context, payload []byte, headers http.Header) (*http.Response, error) {
+	return r.proxy.ImageEdit(c.Request.Context(), payload, headers)
 }

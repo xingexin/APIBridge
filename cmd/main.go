@@ -7,6 +7,8 @@ import (
 
 	"GPTBridge/internal/domain/proxy/repository"
 	proxyservice "GPTBridge/internal/domain/proxy/service"
+	userrepository "GPTBridge/internal/domain/user/repository"
+	userservice "GPTBridge/internal/domain/user/service"
 	walletrepository "GPTBridge/internal/domain/wallet/repository"
 	walletservice "GPTBridge/internal/domain/wallet/service"
 	"GPTBridge/internal/handler"
@@ -42,16 +44,24 @@ func main() {
 	if err := walletrepository.AutoMigrate(db); err != nil {
 		logger.Fatal("数据库迁移失败", zap.Error(err))
 	}
+	if err := userrepository.AutoMigrate(db); err != nil {
+		logger.Fatal("用户表迁移失败", zap.Error(err))
+	}
+	userRepository := userrepository.NewGormUserRepository(db)
+	if err := userRepository.SeedUsers(context.Background(), cfg.Auth.SeedUsers); err != nil {
+		logger.Fatal("初始化用户失败", zap.Error(err))
+	}
 	walletRepository := walletrepository.NewGormWalletRepository(db)
 	if err := walletRepository.SeedAccounts(context.Background(), cfg.Billing.SeedAccounts); err != nil {
 		logger.Fatal("初始化计费账号失败", zap.Error(err))
 	}
 
 	bridgeClient := newBridge(cfg, logger)
+	authService := userservice.NewAuthService(cfg.Auth, userRepository)
 	billingService := walletservice.NewBillingService(cfg.Billing, walletRepository, logger)
 
 	proxyService := proxyservice.NewProxyService(bridgeClient, logger)
-	httpHandler := handler.NewRouter(proxyService, billingService, logger)
+	httpHandler := handler.NewRouter(proxyService, billingService, authService, logger)
 
 	server := &http.Server{
 		Addr:              cfg.Server.ListenAddr,

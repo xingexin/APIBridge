@@ -6,6 +6,8 @@
 
 wallet 域内的实体位于 `internal/domain/wallet/entity`，仓库操作位于 `internal/domain/wallet/repository`。MySQL 连接在服务启动时创建，并注入 wallet 仓库。
 
+完整 MySQL 建表 SQL 见 `docs/mysql-schema.sql`。
+
 ## 表结构
 
 ### `wallet_accounts`

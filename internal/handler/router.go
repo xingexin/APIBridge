@@ -8,6 +8,7 @@ import (
 	"time"
 
 	proxyservice "GPTBridge/internal/domain/proxy/service"
+	userservice "GPTBridge/internal/domain/user/service"
 	walletservice "GPTBridge/internal/domain/wallet/service"
 	"GPTBridge/internal/infra/logging"
 	"GPTBridge/internal/infra/trace"
@@ -19,23 +20,25 @@ import (
 type Router struct {
 	proxy      *proxyservice.ProxyService
 	billing    *walletservice.BillingService
+	auth       *userservice.AuthService
 	engine     *gin.Engine
 	dispatcher map[proxyOperation]proxyCaller
 	logger     *zap.Logger
 }
 
 // NewRouter 创建基于 Gin 的路由入口。
-func NewRouter(proxy *proxyservice.ProxyService, billing *walletservice.BillingService, logger *zap.Logger) http.Handler {
+func NewRouter(proxy *proxyservice.ProxyService, billing *walletservice.BillingService, auth *userservice.AuthService, logger *zap.Logger) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 
 	router := &Router{
 		proxy:   proxy,
 		billing: billing,
+		auth:    auth,
 		engine:  gin.New(),
 		logger:  logger,
 	}
 	router.dispatcher = router.buildDispatchTable()
-	router.engine.Use(router.traceMiddleware(), router.billingMiddleware(), router.accessLogMiddleware(), gin.Recovery())
+	router.engine.Use(router.traceMiddleware(), router.sessionMiddleware(), router.billingMiddleware(), router.accessLogMiddleware(), gin.Recovery())
 	router.registerRoutes()
 	return router.engine
 }
@@ -43,6 +46,9 @@ func NewRouter(proxy *proxyservice.ProxyService, billing *walletservice.BillingS
 // registerRoutes 注册当前支持的对外接口。
 func (r *Router) registerRoutes() {
 	r.engine.GET("/health", r.handleHealth)
+	r.engine.POST("/auth/login", r.handleLogin)
+	r.engine.POST("/auth/logout", r.handleLogout)
+	r.engine.GET("/auth/me", r.handleMe)
 	r.engine.POST("/v1/chat/completions", r.handleChatCompletions)
 	r.engine.POST("/v1/responses", r.handleResponses)
 	r.engine.POST("/v1/images/generations", r.handleImageGenerations)
@@ -142,6 +148,28 @@ func (r *Router) traceMiddleware() gin.HandlerFunc {
 		c.Request.Header.Set(trace.HeaderTraceID, traceID)
 		c.Writer.Header().Set(trace.HeaderTraceID, traceID)
 		c.Request = c.Request.WithContext(trace.WithTraceID(c.Request.Context(), traceID))
+		c.Next()
+	}
+}
+
+// sessionMiddleware 从 cookie 中恢复当前登录用户。
+func (r *Router) sessionMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if r.auth == nil {
+			c.Next()
+			return
+		}
+		token, err := c.Cookie(r.auth.CookieName())
+		if err != nil || token == "" {
+			c.Next()
+			return
+		}
+		user, err := r.auth.AuthenticateSession(c.Request.Context(), token)
+		if err != nil {
+			c.Next()
+			return
+		}
+		c.Request = c.Request.WithContext(userservice.WithCurrentUser(c.Request.Context(), user))
 		c.Next()
 	}
 }

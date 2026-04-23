@@ -14,6 +14,17 @@ openai:
 database:
   dsn: "gptbridge:password@tcp(127.0.0.1:3306)/gptbridge?charset=utf8mb4&parseTime=True&loc=Local"
 
+auth:
+  session_cookie_name: "gptbridge_session"
+  session_ttl_hours: 168
+  cookie_secure: false
+  seed_users:
+    - username: "admin"
+      password: "admin123456"
+      display_name: "管理员"
+      role: "admin"
+      enabled: true
+
 billing:
   enabled: true
   require_api_key: true

@@ -2,12 +2,14 @@ package main
 
 import (
 	"net/http"
-	"os"
 	"time"
 
+	"GPTBridge/internal/domain/proxy/repository"
 	proxyservice "GPTBridge/internal/domain/proxy/service"
 	"GPTBridge/internal/handler"
+	"GPTBridge/internal/infra/config"
 	"GPTBridge/internal/infra/logging"
+	"GPTBridge/internal/infra/normalapi"
 	"GPTBridge/internal/infra/rustbridge"
 
 	"go.uber.org/zap"
@@ -15,9 +17,6 @@ import (
 
 // main 启动代理服务并挂载 Rust 桥接客户端。
 func main() {
-	bridgeBaseURL := getenv("RUST_BRIDGE_BASE_URL", "http://127.0.0.1:8081")
-	listenAddr := getenv("LISTEN_ADDR", ":8080")
-
 	logger, err := logging.NewLogger()
 	if err != nil {
 		panic(err)
@@ -26,33 +25,46 @@ func main() {
 		_ = logger.Sync()
 	}()
 
-	bridgeClient := rustbridge.NewClient(rustbridge.Config{
-		BaseURL: bridgeBaseURL,
-		Timeout: 60 * time.Second,
-	}, logger)
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Fatal("读取配置失败", zap.Error(err))
+	}
+
+	bridgeClient := newBridge(cfg, logger)
 
 	proxyService := proxyservice.NewProxyService(bridgeClient, logger)
 	httpHandler := handler.NewRouter(proxyService, logger)
 
 	server := &http.Server{
-		Addr:              listenAddr,
+		Addr:              cfg.Server.ListenAddr,
 		Handler:           httpHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	logger.Info("代理服务启动",
-		zap.String("listen_addr", listenAddr),
-		zap.String("rust_bridge", bridgeBaseURL),
+		zap.String("listen_addr", cfg.Server.ListenAddr),
+		zap.String("upstream_mode", cfg.Upstream.Mode),
 	)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Fatal("代理服务启动失败", zap.Error(err))
 	}
 }
 
-// getenv 优先读取环境变量，缺省时返回兜底值。
-func getenv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
+// newBridge 根据配置选择 Rust 逆向链路或正常 API 链路。
+func newBridge(cfg config.Config, logger *zap.Logger) repository.Bridge {
+	switch cfg.Upstream.Mode {
+	case "api", "normal", "openai":
+		logger.Info("使用正常 API 上游", zap.String("base_url", cfg.OpenAI.BaseURL))
+		return normalapi.NewClient(normalapi.Config{
+			BaseURL: cfg.OpenAI.BaseURL,
+			APIKey:  cfg.OpenAI.APIKey,
+			Timeout: 60 * time.Second,
+		}, logger)
+	default:
+		logger.Info("使用 Rust RPC 桥接上游", zap.String("addr", cfg.Rust.GRPCAddr))
+		return rustbridge.NewClient(rustbridge.Config{
+			Addr:    cfg.Rust.GRPCAddr,
+			Timeout: 60 * time.Second,
+		}, logger)
 	}
-	return fallback
 }

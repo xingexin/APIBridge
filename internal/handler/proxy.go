@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 
+	"GPTBridge/internal/domain/proxy/entity"
 	"GPTBridge/internal/infra/logging"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -31,7 +32,13 @@ func (r *Router) forwardToBridge(c *gin.Context, operation proxyOperation) {
 		zap.Int("payload_bytes", len(payload)),
 	)
 
-	resp, err := caller(c, payload, c.Request.Header)
+	resp, err := caller(c, entity.ProxyRequest{
+		Operation: string(operation),
+		Method:    c.Request.Method,
+		Path:      requestPath(c),
+		Payload:   payload,
+		Headers:   c.Request.Header,
+	})
 	if err != nil {
 		logger.Error("转发请求失败",
 			zap.String("operation", string(operation)),
@@ -47,4 +54,12 @@ func (r *Router) forwardToBridge(c *gin.Context, operation proxyOperation) {
 		zap.Int("status", resp.StatusCode),
 	)
 	copyResponse(c, resp)
+}
+
+// requestPath 返回客户端原始请求路径。
+func requestPath(c *gin.Context) string {
+	if c.Request.URL.RawQuery == "" {
+		return c.Request.URL.Path
+	}
+	return c.Request.URL.Path + "?" + c.Request.URL.RawQuery
 }

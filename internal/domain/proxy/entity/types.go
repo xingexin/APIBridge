@@ -2,6 +2,15 @@ package entity
 
 import "encoding/json"
 
+// ProxyRequest 表示一次需要转发给上游的请求。
+type ProxyRequest struct {
+	Operation string
+	Method    string
+	Path      string
+	Payload   []byte
+	Headers   map[string][]string
+}
+
 // ChatCompletionRequest 表示聊天补全请求原始报文。
 type ChatCompletionRequest json.RawMessage
 

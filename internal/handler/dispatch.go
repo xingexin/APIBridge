@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 
+	"GPTBridge/internal/domain/proxy/entity"
 	"github.com/gin-gonic/gin"
 )
 
@@ -17,7 +18,7 @@ const (
 )
 
 // proxyCaller 表示具体的下游调用函数。
-type proxyCaller func(*gin.Context, []byte, http.Header) (*http.Response, error)
+type proxyCaller func(*gin.Context, entity.ProxyRequest) (*http.Response, error)
 
 // buildDispatchTable 构建操作和调用函数的映射关系。
 func (r *Router) buildDispatchTable() map[proxyOperation]proxyCaller {
@@ -30,21 +31,21 @@ func (r *Router) buildDispatchTable() map[proxyOperation]proxyCaller {
 }
 
 // callChatCompletion 调用聊天补全处理函数。
-func (r *Router) callChatCompletion(c *gin.Context, payload []byte, headers http.Header) (*http.Response, error) {
-	return r.proxy.ChatCompletion(c.Request.Context(), payload, headers)
+func (r *Router) callChatCompletion(c *gin.Context, req entity.ProxyRequest) (*http.Response, error) {
+	return r.proxy.Forward(c.Request.Context(), req)
 }
 
 // callResponse 调用 responses 处理函数。
-func (r *Router) callResponse(c *gin.Context, payload []byte, headers http.Header) (*http.Response, error) {
-	return r.proxy.Response(c.Request.Context(), payload, headers)
+func (r *Router) callResponse(c *gin.Context, req entity.ProxyRequest) (*http.Response, error) {
+	return r.proxy.Forward(c.Request.Context(), req)
 }
 
 // callImageGeneration 调用图片生成处理函数。
-func (r *Router) callImageGeneration(c *gin.Context, payload []byte, headers http.Header) (*http.Response, error) {
-	return r.proxy.ImageGeneration(c.Request.Context(), payload, headers)
+func (r *Router) callImageGeneration(c *gin.Context, req entity.ProxyRequest) (*http.Response, error) {
+	return r.proxy.Forward(c.Request.Context(), req)
 }
 
 // callImageEdit 调用图片编辑处理函数。
-func (r *Router) callImageEdit(c *gin.Context, payload []byte, headers http.Header) (*http.Response, error) {
-	return r.proxy.ImageEdit(c.Request.Context(), payload, headers)
+func (r *Router) callImageEdit(c *gin.Context, req entity.ProxyRequest) (*http.Response, error) {
+	return r.proxy.Forward(c.Request.Context(), req)
 }

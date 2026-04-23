@@ -22,28 +22,15 @@ func NewProxyService(bridge repository.Bridge, logger *zap.Logger) *ProxyService
 	return &ProxyService{bridge: bridge, logger: logger}
 }
 
-// ChatCompletion 调用 Rust 的聊天接口。
-func (s *ProxyService) ChatCompletion(ctx context.Context, payload []byte, headers http.Header) (*http.Response, error) {
-	logging.WithContext(s.logger, ctx).Debug("调用聊天接口", zap.Int("payload_bytes", len(payload)))
-	return s.bridge.ChatCompletion(ctx, payload, headers)
-}
-
-// Response 调用 Rust 的 responses 接口。
-func (s *ProxyService) Response(ctx context.Context, payload []byte, headers http.Header) (*http.Response, error) {
-	logging.WithContext(s.logger, ctx).Debug("调用 responses 接口", zap.Int("payload_bytes", len(payload)))
-	return s.bridge.Response(ctx, payload, headers)
-}
-
-// ImageGeneration 调用 Rust 的图片生成接口。
-func (s *ProxyService) ImageGeneration(ctx context.Context, payload []byte, headers http.Header) (*http.Response, error) {
-	logging.WithContext(s.logger, ctx).Debug("调用图片生成接口", zap.Int("payload_bytes", len(payload)))
-	return s.bridge.ImageGeneration(ctx, payload, headers)
-}
-
-// ImageEdit 调用 Rust 的图片编辑接口。
-func (s *ProxyService) ImageEdit(ctx context.Context, payload []byte, headers http.Header) (*http.Response, error) {
-	logging.WithContext(s.logger, ctx).Debug("调用图片编辑接口", zap.Int("payload_bytes", len(payload)))
-	return s.bridge.ImageEdit(ctx, payload, headers)
+// Forward 调用当前配置的上游服务。
+func (s *ProxyService) Forward(ctx context.Context, req entity.ProxyRequest) (*http.Response, error) {
+	logging.WithContext(s.logger, ctx).Debug("调用上游服务",
+		zap.String("operation", req.Operation),
+		zap.String("method", req.Method),
+		zap.String("path", req.Path),
+		zap.Int("payload_bytes", len(req.Payload)),
+	)
+	return s.bridge.Forward(ctx, req)
 }
 
 // UploadFile 调用 Rust 的文件上传接口。

@@ -3,13 +3,12 @@ package rustbridge
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
-	"net/url"
-	"path"
 	"strings"
 	"time"
 
@@ -17,21 +16,35 @@ import (
 	"GPTBridge/internal/infra/logging"
 	"GPTBridge/internal/infra/trace"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
-// Client 封装对 Rust 桥接服务的 HTTP 调用。
+const streamProxyMethod = "/gptbridge.bridge.v1.BridgeService/StreamProxy"
+
+const (
+	operationChatCompletion = "chat_completion"
+	operationResponse       = "response"
+	operationImageGenerate  = "image_generation"
+	operationImageEdit      = "image_edit"
+	operationFileUpload     = "file_upload"
+	operationModels         = "models"
+	operationHealth         = "health"
+)
+
+// Client 封装对 Rust RPC 服务的调用。
 type Client struct {
-	baseURL    *url.URL
-	httpClient *http.Client
-	logger     *zap.Logger
+	addr   string
+	conn   *grpc.ClientConn
+	logger *zap.Logger
 }
 
-// NewClient 创建 Rust 桥接客户端。
+// NewClient 创建 Rust RPC 客户端。
 func NewClient(cfg Config, logger *zap.Logger) *Client {
-	baseURL := strings.TrimRight(cfg.BaseURL, "/")
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		panic(fmt.Sprintf("invalid rust bridge base url %q: %v", cfg.BaseURL, err))
+	addr := strings.TrimSpace(cfg.Addr)
+	if addr == "" {
+		addr = "127.0.0.1:50051"
 	}
 
 	timeout := cfg.Timeout
@@ -39,36 +52,24 @@ func NewClient(cfg Config, logger *zap.Logger) *Client {
 		timeout = 60 * time.Second
 	}
 
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		panic(fmt.Sprintf("connect rust rpc bridge %q failed: %v", addr, err))
+	}
+
 	return &Client{
-		baseURL: parsed,
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
+		addr:   addr,
+		conn:   conn,
 		logger: logger,
 	}
 }
 
-// ChatCompletion 调用聊天补全内部接口。
-func (c *Client) ChatCompletion(ctx context.Context, payload []byte, headers http.Header) (*http.Response, error) {
-	return c.doJSON(ctx, http.MethodPost, pathChatCompletions, payload, headers)
+// Forward 调用 Rust RPC 服务。
+func (c *Client) Forward(ctx context.Context, req entity.ProxyRequest) (*http.Response, error) {
+	return c.stream(ctx, req.Operation, req.Payload, http.Header(req.Headers))
 }
 
-// Response 调用 responses 内部接口。
-func (c *Client) Response(ctx context.Context, payload []byte, headers http.Header) (*http.Response, error) {
-	return c.doJSON(ctx, http.MethodPost, pathResponses, payload, headers)
-}
-
-// ImageGeneration 调用图片生成内部接口。
-func (c *Client) ImageGeneration(ctx context.Context, payload []byte, headers http.Header) (*http.Response, error) {
-	return c.doJSON(ctx, http.MethodPost, pathImageGenerations, payload, headers)
-}
-
-// ImageEdit 调用图片编辑内部接口。
-func (c *Client) ImageEdit(ctx context.Context, payload []byte, headers http.Header) (*http.Response, error) {
-	return c.doJSON(ctx, http.MethodPost, pathImageEdits, payload, headers)
-}
-
-// UploadFile 调用文件上传内部接口。
+// UploadFile 调用 Rust 的文件上传接口。
 func (c *Client) UploadFile(ctx context.Context, filename string, contentType string, content io.Reader, purpose string, headers http.Header) (entity.FileUploadResponse, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -88,41 +89,28 @@ func (c *Client) UploadFile(ctx context.Context, filename string, contentType st
 		return entity.FileUploadResponse{}, err
 	}
 
-	req, err := c.newRequest(ctx, http.MethodPost, pathFiles, &body)
-	if err != nil {
-		return entity.FileUploadResponse{}, err
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	nextHeaders := headers.Clone()
+	nextHeaders.Set("Content-Type", writer.FormDataContentType())
 	if contentType != "" {
-		req.Header.Set("X-File-Content-Type", contentType)
+		nextHeaders.Set("X-File-Content-Type", contentType)
 	}
-	copyAllowedHeaders(req.Header, headers)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.stream(ctx, operationFileUpload, body.Bytes(), nextHeaders)
 	if err != nil {
-		logging.WithContext(c.logger, ctx).Error("调用 Rust 文件上传接口失败", zap.Error(err))
 		return entity.FileUploadResponse{}, err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		return entity.FileUploadResponse{}, decodeBridgeError(resp)
-	}
 
 	var result entity.FileUploadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return entity.FileUploadResponse{}, err
 	}
-	logging.WithContext(c.logger, ctx).Debug("Rust 文件上传接口调用成功",
-		zap.String("filename", filename),
-		zap.String("file_id", result.ID),
-	)
 	return result, nil
 }
 
-// Models 获取模型列表。
+// Models 获取 Rust 返回的模型列表。
 func (c *Client) Models(ctx context.Context, headers http.Header) (entity.ModelListResponse, error) {
-	resp, err := c.doJSON(ctx, http.MethodGet, pathModels, nil, headers)
+	resp, err := c.stream(ctx, operationModels, nil, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -135,14 +123,14 @@ func (c *Client) Models(ctx context.Context, headers http.Header) (entity.ModelL
 	return entity.ModelListResponse(raw), nil
 }
 
-// Health 获取桥接服务健康状态。
+// Health 获取 Rust 服务的健康状态。
 func (c *Client) Health(ctx context.Context, accountID string, headers http.Header) (entity.HealthResponse, error) {
-	requestPath := pathHealth
-	if accountID != "" {
-		requestPath = requestPath + "?account_id=" + url.QueryEscape(accountID)
+	payload, err := json.Marshal(map[string]string{"account_id": accountID})
+	if err != nil {
+		return entity.HealthResponse{}, err
 	}
 
-	resp, err := c.doJSON(ctx, http.MethodGet, requestPath, nil, headers)
+	resp, err := c.stream(ctx, operationHealth, payload, headers)
 	if err != nil {
 		return entity.HealthResponse{}, err
 	}
@@ -155,110 +143,145 @@ func (c *Client) Health(ctx context.Context, accountID string, headers http.Head
 	return result, nil
 }
 
-// doJSON 发送常规 JSON 请求到 Rust 桥接服务。
-func (c *Client) doJSON(ctx context.Context, method string, endpoint string, payload []byte, headers http.Header) (*http.Response, error) {
-	var body io.Reader
-	if payload != nil {
-		body = bytes.NewReader(payload)
-	}
-
-	req, err := c.newRequest(ctx, method, endpoint, body)
+// stream 调用 Rust 的 server-stream RPC，并包装成 http.Response 交给上层透传。
+func (c *Client) stream(ctx context.Context, operation string, payload []byte, headers http.Header) (*http.Response, error) {
+	request, err := c.buildRequest(operation, payload, headers)
 	if err != nil {
 		return nil, err
 	}
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	copyAllowedHeaders(req.Header, headers)
-	if traceID := trace.TraceIDFromContext(ctx); traceID != "" {
-		req.Header.Set(trace.HeaderTraceID, traceID)
-	}
 
-	logging.WithContext(c.logger, ctx).Debug("请求 Rust 接口",
-		zap.String("method", method),
-		zap.String("endpoint", endpoint),
-	)
-
-	resp, err := c.httpClient.Do(req)
+	desc := &grpc.StreamDesc{
+		ServerStreams: true,
+		ClientStreams: false,
+	}
+	stream, err := c.conn.NewStream(ctx, desc, streamProxyMethod)
 	if err != nil {
-		logging.WithContext(c.logger, ctx).Error("请求 Rust 接口失败",
-			zap.String("method", method),
-			zap.String("endpoint", endpoint),
+		logging.WithContext(c.logger, ctx).Error("创建 Rust RPC 流失败",
+			zap.String("operation", operation),
 			zap.Error(err),
 		)
 		return nil, err
 	}
-	if resp.StatusCode >= 400 {
-		defer resp.Body.Close()
-		logging.WithContext(c.logger, ctx).Warn("Rust 接口返回错误状态",
-			zap.String("method", method),
-			zap.String("endpoint", endpoint),
-			zap.Int("status", resp.StatusCode),
-		)
-		return nil, decodeBridgeError(resp)
+	if err := stream.SendMsg(request); err != nil {
+		return nil, err
 	}
-	logging.WithContext(c.logger, ctx).Debug("Rust 接口请求成功",
-		zap.String("method", method),
-		zap.String("endpoint", endpoint),
-		zap.Int("status", resp.StatusCode),
+	if err := stream.CloseSend(); err != nil {
+		return nil, err
+	}
+
+	first := &structpb.Struct{}
+	if err := stream.RecvMsg(first); err != nil {
+		return nil, err
+	}
+
+	statusCode := int(numberValue(first, "status_code", http.StatusOK))
+	responseHeaders := headerFromStruct(first)
+	reader, writer := io.Pipe()
+
+	go c.copyStream(ctx, operation, stream, writer)
+
+	logging.WithContext(c.logger, ctx).Debug("Rust RPC 流已建立",
+		zap.String("operation", operation),
+		zap.Int("status", statusCode),
 	)
-	return resp, nil
+
+	return &http.Response{
+		StatusCode: statusCode,
+		Header:     responseHeaders,
+		Body:       reader,
+	}, nil
 }
 
-// newRequest 创建基础 HTTP 请求对象。
-func (c *Client) newRequest(ctx context.Context, method string, endpoint string, body io.Reader) (*http.Request, error) {
-	requestURL, err := c.buildURL(endpoint)
-	if err != nil {
-		return nil, err
-	}
-	return http.NewRequestWithContext(ctx, method, requestURL.String(), body)
-}
+// copyStream 将 Rust RPC 返回的 body chunk 写入管道。
+func (c *Client) copyStream(ctx context.Context, operation string, stream grpc.ClientStream, writer *io.PipeWriter) {
+	defer writer.Close()
 
-// buildURL 组装 Rust 桥接服务的完整请求地址。
-func (c *Client) buildURL(endpoint string) (*url.URL, error) {
-	requestURL := *c.baseURL
+	for {
+		chunk := &structpb.Struct{}
+		if err := stream.RecvMsg(chunk); err != nil {
+			if err == io.EOF {
+				return
+			}
+			logging.WithContext(c.logger, ctx).Error("读取 Rust RPC 流失败",
+				zap.String("operation", operation),
+				zap.Error(err),
+			)
+			_ = writer.CloseWithError(err)
+			return
+		}
 
-	endpointURL, err := url.Parse(endpoint)
-	if err != nil {
-		return nil, err
-	}
-
-	requestURL.Path = path.Join(c.baseURL.Path, endpointURL.Path)
-	requestURL.RawQuery = endpointURL.RawQuery
-	return &requestURL, nil
-}
-
-// copyAllowedHeaders 拷贝允许透传的请求头。
-func copyAllowedHeaders(dst http.Header, src http.Header) {
-	for _, key := range []string{
-		"Authorization",
-		"X-Request-Id",
-		trace.HeaderTraceID,
-		"X-Account-Id",
-		"X-Model-Override",
-		"Accept",
-	} {
-		if value := src.Get(key); value != "" {
-			dst.Set(key, value)
+		data, err := decodeBody(chunk)
+		if err != nil {
+			_ = writer.CloseWithError(err)
+			return
+		}
+		if len(data) == 0 {
+			continue
+		}
+		if _, err := writer.Write(data); err != nil {
+			_ = writer.CloseWithError(err)
+			return
 		}
 	}
 }
 
-// bridgeError 表示 Rust 桥接服务返回的错误。
-type bridgeError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *bridgeError) Error() string {
-	return fmt.Sprintf("Rust 桥接服务返回状态码 %d: %s", e.StatusCode, e.Body)
-}
-
-// decodeBridgeError 将 Rust 桥接服务错误响应解码为本地错误。
-func decodeBridgeError(resp *http.Response) error {
-	body, _ := io.ReadAll(resp.Body)
-	return &bridgeError{
-		StatusCode: resp.StatusCode,
-		Body:       strings.TrimSpace(string(body)),
+// buildRequest 构造通用 RPC 请求。
+func (c *Client) buildRequest(operation string, payload []byte, headers http.Header) (*structpb.Struct, error) {
+	values := map[string]any{
+		"operation":   operation,
+		"headers":     selectedHeaders(headers),
+		"body_base64": base64.StdEncoding.EncodeToString(payload),
 	}
+	return structpb.NewStruct(values)
+}
+
+// selectedHeaders 选择允许传给 Rust 的请求头。
+func selectedHeaders(headers http.Header) map[string]any {
+	result := make(map[string]any)
+	for _, key := range []string{
+		"Authorization",
+		trace.HeaderRequestID,
+		trace.HeaderTraceID,
+		"X-Account-Id",
+		"X-Model-Override",
+		"X-File-Content-Type",
+		"Content-Type",
+		"Accept",
+	} {
+		if value := headers.Get(key); value != "" {
+			result[key] = value
+		}
+	}
+	return result
+}
+
+// headerFromStruct 从首个 RPC chunk 中提取响应头。
+func headerFromStruct(value *structpb.Struct) http.Header {
+	header := make(http.Header)
+	headersValue := value.GetFields()["headers"]
+	if headersValue == nil || headersValue.GetStructValue() == nil {
+		return header
+	}
+	for key, item := range headersValue.GetStructValue().GetFields() {
+		header.Set(key, item.GetStringValue())
+	}
+	return header
+}
+
+// decodeBody 解码 RPC body chunk。
+func decodeBody(value *structpb.Struct) ([]byte, error) {
+	raw := value.GetFields()["body_base64"]
+	if raw == nil || raw.GetStringValue() == "" {
+		return nil, nil
+	}
+	return base64.StdEncoding.DecodeString(raw.GetStringValue())
+}
+
+// numberValue 从 Struct 中读取数字。
+func numberValue(value *structpb.Struct, key string, fallback float64) float64 {
+	raw := value.GetFields()[key]
+	if raw == nil {
+		return fallback
+	}
+	return raw.GetNumberValue()
 }

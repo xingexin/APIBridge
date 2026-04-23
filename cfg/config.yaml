@@ -1,0 +1,12 @@
+server:
+  listen_addr: ":8080"
+
+upstream:
+  mode: "rust"
+
+rust:
+  grpc_addr: "127.0.0.1:50051"
+
+openai:
+  base_url: "https://api.openai.com"
+  api_key: ""

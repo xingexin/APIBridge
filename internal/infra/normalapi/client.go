@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"GPTBridge/internal/biz/contracts"
 	"GPTBridge/internal/domain/proxy/entity"
 	"GPTBridge/internal/infra/logging"
 	"GPTBridge/internal/infra/trace"
@@ -54,10 +55,10 @@ func NewClient(cfg Config, logger *zap.Logger) *Client {
 	}
 }
 
-// Forward 按客户端原始路径请求正常 API。
-func (c *Client) Forward(ctx context.Context, req entity.ProxyRequest) (*http.Response, error) {
+// Forward 按 route 中的地址和凭证请求正常 API。
+func (c *Client) Forward(ctx context.Context, route contracts.Route, req entity.ProxyRequest) (*http.Response, error) {
 	headers := http.Header(req.Headers)
-	return c.forward(ctx, req.Method, req.Path, bytes.NewReader(req.Payload), headers, requestOptions{
+	return c.forward(ctx, route, req.Method, req.Path, bytes.NewReader(req.Payload), headers, requestOptions{
 		contentType: headers.Get("Content-Type"),
 	})
 }
@@ -81,7 +82,7 @@ func (c *Client) UploadFile(ctx context.Context, filename string, contentType st
 		return entity.FileUploadResponse{}, err
 	}
 
-	resp, err := c.forward(ctx, http.MethodPost, "/v1/files", &body, headers, requestOptions{
+	resp, err := c.forward(ctx, contracts.Route{}, http.MethodPost, "/v1/files", &body, headers, requestOptions{
 		contentType: writer.FormDataContentType(),
 	})
 	if err != nil {
@@ -98,7 +99,7 @@ func (c *Client) UploadFile(ctx context.Context, filename string, contentType st
 
 // Models 获取正常 API 返回的模型列表。
 func (c *Client) Models(ctx context.Context, headers http.Header) (entity.ModelListResponse, error) {
-	resp, err := c.forward(ctx, http.MethodGet, "/v1/models", nil, headers, requestOptions{})
+	resp, err := c.forward(ctx, contracts.Route{}, http.MethodGet, "/v1/models", nil, headers, requestOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -120,15 +121,15 @@ func (c *Client) Health(ctx context.Context, accountID string, headers http.Head
 }
 
 // forward 将请求转发到正常 API 上游。
-func (c *Client) forward(ctx context.Context, method string, endpoint string, body io.Reader, headers http.Header, opts requestOptions) (*http.Response, error) {
-	req, err := c.newRequest(ctx, method, endpoint, body)
+func (c *Client) forward(ctx context.Context, route contracts.Route, method string, endpoint string, body io.Reader, headers http.Header, opts requestOptions) (*http.Response, error) {
+	req, err := c.newRequest(ctx, route, method, endpoint, body)
 	if err != nil {
 		return nil, err
 	}
 	if opts.contentType != "" {
 		req.Header.Set("Content-Type", opts.contentType)
 	}
-	c.applyHeaders(req.Header, headers)
+	c.applyHeaders(req.Header, route, headers)
 
 	logging.WithContext(c.logger, ctx).Debug("请求正常 API",
 		zap.String("method", method),
@@ -144,21 +145,12 @@ func (c *Client) forward(ctx context.Context, method string, endpoint string, bo
 		)
 		return nil, err
 	}
-	if resp.StatusCode >= 400 {
-		defer resp.Body.Close()
-		logging.WithContext(c.logger, ctx).Warn("正常 API 返回错误状态",
-			zap.String("method", method),
-			zap.String("endpoint", endpoint),
-			zap.Int("status", resp.StatusCode),
-		)
-		return nil, decodeAPIError(resp)
-	}
 	return resp, nil
 }
 
 // newRequest 创建基础 HTTP 请求对象。
-func (c *Client) newRequest(ctx context.Context, method string, endpoint string, body io.Reader) (*http.Request, error) {
-	requestURL, err := c.buildURL(endpoint)
+func (c *Client) newRequest(ctx context.Context, route contracts.Route, method string, endpoint string, body io.Reader) (*http.Request, error) {
+	requestURL, err := c.buildURL(route, endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -166,24 +158,39 @@ func (c *Client) newRequest(ctx context.Context, method string, endpoint string,
 }
 
 // buildURL 组装正常 API 上游的完整请求地址。
-func (c *Client) buildURL(endpoint string) (*url.URL, error) {
-	requestURL := *c.baseURL
+func (c *Client) buildURL(route contracts.Route, endpoint string) (*url.URL, error) {
+	base := c.baseURL
+	if route.BaseURL != "" {
+		parsed, err := url.Parse(strings.TrimRight(route.BaseURL, "/"))
+		if err != nil {
+			return nil, err
+		}
+		base = parsed
+	}
+	requestURL := *base
 	endpointURL, err := url.Parse(endpoint)
 	if err != nil {
 		return nil, err
 	}
 
-	requestURL.Path = path.Join(c.baseURL.Path, endpointURL.Path)
+	requestURL.Path = path.Join(base.Path, endpointURL.Path)
 	requestURL.RawQuery = endpointURL.RawQuery
 	return &requestURL, nil
 }
 
 // applyHeaders 设置上游请求需要的请求头。
-func (c *Client) applyHeaders(dst http.Header, src http.Header) {
-	if c.apiKey != "" {
+func (c *Client) applyHeaders(dst http.Header, route contracts.Route, src http.Header) {
+	if route.APIKey != "" {
+		dst.Set("Authorization", "Bearer "+route.APIKey)
+	} else if c.apiKey != "" {
 		dst.Set("Authorization", "Bearer "+c.apiKey)
 	} else if value := src.Get("Authorization"); value != "" {
 		dst.Set("Authorization", value)
+	}
+	for key, value := range route.ExtraHeaders {
+		if key != "" && value != "" {
+			dst.Set(key, value)
+		}
 	}
 
 	for _, key := range []string{

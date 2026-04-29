@@ -10,8 +10,10 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
+	"GPTBridge/internal/biz/contracts"
 	"GPTBridge/internal/domain/proxy/entity"
 	"GPTBridge/internal/infra/logging"
 	"GPTBridge/internal/infra/trace"
@@ -37,6 +39,8 @@ const (
 type Client struct {
 	addr   string
 	conn   *grpc.ClientConn
+	conns  map[string]*grpc.ClientConn
+	mu     sync.Mutex
 	logger *zap.Logger
 }
 
@@ -60,13 +64,14 @@ func NewClient(cfg Config, logger *zap.Logger) *Client {
 	return &Client{
 		addr:   addr,
 		conn:   conn,
+		conns:  map[string]*grpc.ClientConn{addr: conn},
 		logger: logger,
 	}
 }
 
 // Forward 调用 Rust RPC 服务。
-func (c *Client) Forward(ctx context.Context, req entity.ProxyRequest) (*http.Response, error) {
-	return c.stream(ctx, req.Operation, req.Method, req.Path, req.Payload, http.Header(req.Headers))
+func (c *Client) Forward(ctx context.Context, route contracts.Route, req entity.ProxyRequest) (*http.Response, error) {
+	return c.stream(ctx, route, req.Operation, req.Method, req.Path, req.Payload, http.Header(req.Headers))
 }
 
 // UploadFile 调用 Rust 的文件上传接口。
@@ -95,7 +100,7 @@ func (c *Client) UploadFile(ctx context.Context, filename string, contentType st
 		nextHeaders.Set("X-File-Content-Type", contentType)
 	}
 
-	resp, err := c.stream(ctx, operationFileUpload, http.MethodPost, "/v1/files", body.Bytes(), nextHeaders)
+	resp, err := c.stream(ctx, contracts.Route{}, operationFileUpload, http.MethodPost, "/v1/files", body.Bytes(), nextHeaders)
 	if err != nil {
 		return entity.FileUploadResponse{}, err
 	}
@@ -110,7 +115,7 @@ func (c *Client) UploadFile(ctx context.Context, filename string, contentType st
 
 // Models 获取 Rust 返回的模型列表。
 func (c *Client) Models(ctx context.Context, headers http.Header) (entity.ModelListResponse, error) {
-	resp, err := c.stream(ctx, operationModels, http.MethodGet, "/v1/models", nil, headers)
+	resp, err := c.stream(ctx, contracts.Route{}, operationModels, http.MethodGet, "/v1/models", nil, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +135,7 @@ func (c *Client) Health(ctx context.Context, accountID string, headers http.Head
 		return entity.HealthResponse{}, err
 	}
 
-	resp, err := c.stream(ctx, operationHealth, http.MethodPost, "/health", payload, headers)
+	resp, err := c.stream(ctx, contracts.Route{}, operationHealth, http.MethodPost, "/health", payload, headers)
 	if err != nil {
 		return entity.HealthResponse{}, err
 	}
@@ -144,8 +149,8 @@ func (c *Client) Health(ctx context.Context, accountID string, headers http.Head
 }
 
 // stream 调用 Rust 的 server-stream RPC，并包装成 http.Response 交给上层透传。
-func (c *Client) stream(ctx context.Context, operation string, method string, requestPath string, payload []byte, headers http.Header) (*http.Response, error) {
-	request, err := c.buildRequest(operation, method, requestPath, payload, headers)
+func (c *Client) stream(ctx context.Context, route contracts.Route, operation string, method string, requestPath string, payload []byte, headers http.Header) (*http.Response, error) {
+	request, err := c.buildRequest(route, operation, method, requestPath, payload, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +159,11 @@ func (c *Client) stream(ctx context.Context, operation string, method string, re
 		ServerStreams: true,
 		ClientStreams: false,
 	}
-	stream, err := c.conn.NewStream(ctx, desc, streamProxyMethod)
+	conn, err := c.connFor(route.RustGRPCAddr)
+	if err != nil {
+		return nil, err
+	}
+	stream, err := conn.NewStream(ctx, desc, streamProxyMethod)
 	if err != nil {
 		logging.WithContext(c.logger, ctx).Error("创建 Rust RPC 流失败",
 			zap.String("operation", operation),
@@ -226,15 +235,47 @@ func (c *Client) copyStream(ctx context.Context, operation string, stream grpc.C
 }
 
 // buildRequest 构造通用 RPC 请求。
-func (c *Client) buildRequest(operation string, method string, requestPath string, payload []byte, headers http.Header) (*structpb.Struct, error) {
+func (c *Client) buildRequest(route contracts.Route, operation string, method string, requestPath string, payload []byte, headers http.Header) (*structpb.Struct, error) {
 	values := map[string]any{
 		"operation":   operation,
 		"method":      method,
 		"path":        requestPath,
 		"headers":     selectedHeaders(headers),
 		"body_base64": base64.StdEncoding.EncodeToString(payload),
+		"route": map[string]any{
+			"source_type":         route.SourceType,
+			"pool_id":             route.PoolID,
+			"upstream_account_id": route.UpstreamAccountID,
+			"credential_ref":      route.CredentialRef,
+			"base_url":            route.BaseURL,
+			"rust_grpc_addr":      route.RustGRPCAddr,
+			"extra_headers":       route.ExtraHeaders,
+		},
+	}
+	for key, value := range route.ExtraHeaders {
+		if key != "" && value != "" {
+			headers.Set(key, value)
+		}
 	}
 	return structpb.NewStruct(values)
+}
+
+func (c *Client) connFor(addr string) (*grpc.ClientConn, error) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		addr = c.addr
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if conn, ok := c.conns[addr]; ok {
+		return conn, nil
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, err
+	}
+	c.conns[addr] = conn
+	return conn, nil
 }
 
 // selectedHeaders 选择允许传给 Rust 的请求头。

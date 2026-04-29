@@ -32,6 +32,7 @@ billing:
   default_input_price_per_1k: 0.001
   default_output_price_per_1k: 0.002
   request_price: 0
+  default_period_days: 30
   seed_accounts:
     - account_id: "local-dev"
       name: "local-dev"

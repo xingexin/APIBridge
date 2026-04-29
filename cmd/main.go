@@ -5,12 +5,14 @@ import (
 	"net/http"
 	"time"
 
-	"GPTBridge/internal/domain/proxy/repository"
+	"GPTBridge/internal/biz/contracts"
+	"GPTBridge/internal/biz/proxygateway"
+	billingrepository "GPTBridge/internal/domain/billing/repository"
+	proxyrepository "GPTBridge/internal/domain/proxy/repository"
 	proxyservice "GPTBridge/internal/domain/proxy/service"
+	upstreamrepository "GPTBridge/internal/domain/upstream/repository"
 	userrepository "GPTBridge/internal/domain/user/repository"
 	userservice "GPTBridge/internal/domain/user/service"
-	walletrepository "GPTBridge/internal/domain/wallet/repository"
-	walletservice "GPTBridge/internal/domain/wallet/service"
 	"GPTBridge/internal/handler"
 	"GPTBridge/internal/infra/config"
 	"GPTBridge/internal/infra/logging"
@@ -41,8 +43,11 @@ func main() {
 	if err != nil {
 		logger.Fatal("打开数据库失败", zap.Error(err))
 	}
-	if err := walletrepository.AutoMigrate(db); err != nil {
-		logger.Fatal("数据库迁移失败", zap.Error(err))
+	if err := billingrepository.AutoMigrate(db); err != nil {
+		logger.Fatal("计费表迁移失败", zap.Error(err))
+	}
+	if err := upstreamrepository.AutoMigrate(db); err != nil {
+		logger.Fatal("上游池表迁移失败", zap.Error(err))
 	}
 	if err := userrepository.AutoMigrate(db); err != nil {
 		logger.Fatal("用户表迁移失败", zap.Error(err))
@@ -51,17 +56,19 @@ func main() {
 	if err := userRepository.SeedUsers(context.Background(), cfg.Auth.SeedUsers); err != nil {
 		logger.Fatal("初始化用户失败", zap.Error(err))
 	}
-	walletRepository := walletrepository.NewGormWalletRepository(db)
-	if err := walletRepository.SeedAccounts(context.Background(), cfg.Billing.SeedAccounts); err != nil {
+	billingRepository := billingrepository.NewGormBillingRepository(db)
+	if err := billingRepository.SeedAccounts(context.Background(), cfg.Billing.SeedAccounts, cfg.Billing.DefaultPeriodDays); err != nil {
 		logger.Fatal("初始化计费账号失败", zap.Error(err))
 	}
+	upstreamRepository := upstreamrepository.NewGormUpstreamRepository(db)
+	if err := upstreamRepository.SeedDefault(context.Background(), cfg); err != nil {
+		logger.Fatal("初始化上游帐号池失败", zap.Error(err))
+	}
 
-	bridgeClient := newBridge(cfg, logger)
+	proxyService := newProxyService(cfg, logger)
 	authService := userservice.NewAuthService(cfg.Auth, userRepository)
-	billingService := walletservice.NewBillingService(cfg.Billing, walletRepository, logger)
-
-	proxyService := proxyservice.NewProxyService(bridgeClient, logger)
-	httpHandler := handler.NewRouter(proxyService, billingService, authService, logger)
+	gateway := proxygateway.NewGateway(db, cfg, proxyService, logger)
+	httpHandler := handler.NewRouter(gateway, authService, logger)
 
 	server := &http.Server{
 		Addr:              cfg.Server.ListenAddr,
@@ -78,21 +85,22 @@ func main() {
 	}
 }
 
-// newBridge 根据配置选择 Rust 逆向链路或正常 API 链路。
-func newBridge(cfg config.Config, logger *zap.Logger) repository.Bridge {
-	switch cfg.Upstream.Mode {
-	case "api", "normal", "openai":
-		logger.Info("使用正常 API 上游", zap.String("base_url", cfg.OpenAI.BaseURL))
-		return normalapi.NewClient(normalapi.Config{
+// newProxyService 注册 normal/rust provider，具体使用哪个由 upstream route 决定。
+func newProxyService(cfg config.Config, logger *zap.Logger) *proxyservice.ProxyService {
+	logger.Info("注册上游 provider",
+		zap.String("normal_base_url", cfg.OpenAI.BaseURL),
+		zap.String("rust_grpc_addr", cfg.Rust.GRPCAddr),
+	)
+	providers := map[string]proxyrepository.Forwarder{
+		contracts.SourceTypeNormal: normalapi.NewClient(normalapi.Config{
 			BaseURL: cfg.OpenAI.BaseURL,
 			APIKey:  cfg.OpenAI.APIKey,
 			Timeout: 60 * time.Second,
-		}, logger)
-	default:
-		logger.Info("使用 Rust RPC 桥接上游", zap.String("addr", cfg.Rust.GRPCAddr))
-		return rustbridge.NewClient(rustbridge.Config{
+		}, logger),
+		contracts.SourceTypeRust: rustbridge.NewClient(rustbridge.Config{
 			Addr:    cfg.Rust.GRPCAddr,
 			Timeout: 60 * time.Second,
-		}, logger)
+		}, logger),
 	}
+	return proxyservice.NewProxyService(providers, logger)
 }

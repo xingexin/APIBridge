@@ -24,7 +24,31 @@ type ServerConfig struct {
 
 // UpstreamConfig 表示上游选择配置。
 type UpstreamConfig struct {
-	Mode string `mapstructure:"mode"`
+	Mode  string               `mapstructure:"mode"`
+	Pools []UpstreamPoolConfig `mapstructure:"pools"`
+}
+
+// UpstreamPoolConfig 表示启动时初始化的上游帐号池。
+type UpstreamPoolConfig struct {
+	PoolID              string                     `mapstructure:"pool_id"`
+	Name                string                     `mapstructure:"name"`
+	SourceType          string                     `mapstructure:"source_type"`
+	BaseURL             string                     `mapstructure:"base_url"`
+	RustGRPCAddr        string                     `mapstructure:"rust_grpc_addr"`
+	MonthlyQuotaCredits float64                    `mapstructure:"monthly_quota_credits"`
+	OversellPercent     float64                    `mapstructure:"oversell_percent"`
+	ExhaustThreshold    float64                    `mapstructure:"exhaust_threshold"`
+	DisabledByAdmin     bool                       `mapstructure:"disabled_by_admin"`
+	APIAccounts         []UpstreamAPIAccountConfig `mapstructure:"api_accounts"`
+}
+
+// UpstreamAPIAccountConfig 表示帐号池内的上游 API 帐号。
+type UpstreamAPIAccountConfig struct {
+	AccountRef          string  `mapstructure:"account_ref"`
+	APIKey              string  `mapstructure:"api_key"`
+	MonthlyQuotaCredits float64 `mapstructure:"monthly_quota_credits"`
+	Priority            int     `mapstructure:"priority"`
+	DisabledByAdmin     bool    `mapstructure:"disabled_by_admin"`
 }
 
 // RustConfig 表示 Rust RPC 配置。
@@ -68,6 +92,7 @@ type BillingConfig struct {
 	DefaultInputPricePer1K  float64                 `mapstructure:"default_input_price_per_1k"`
 	DefaultOutputPricePer1K float64                 `mapstructure:"default_output_price_per_1k"`
 	RequestPrice            float64                 `mapstructure:"request_price"`
+	DefaultPeriodDays       int                     `mapstructure:"default_period_days"`
 	SeedAccounts            []BillingAccountConfig  `mapstructure:"seed_accounts"`
 	Models                  map[string]ModelPricing `mapstructure:"models"`
 }
@@ -139,4 +164,5 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("billing.default_input_price_per_1k", 0.001)
 	v.SetDefault("billing.default_output_price_per_1k", 0.002)
 	v.SetDefault("billing.request_price", 0)
+	v.SetDefault("billing.default_period_days", 30)
 }

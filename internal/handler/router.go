@@ -2,14 +2,15 @@ package handler
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
-	proxyservice "GPTBridge/internal/domain/proxy/service"
+	"GPTBridge/internal/biz/proxygateway"
+	billingservice "GPTBridge/internal/domain/billing/service"
 	userservice "GPTBridge/internal/domain/user/service"
-	walletservice "GPTBridge/internal/domain/wallet/service"
 	"GPTBridge/internal/infra/logging"
 	"GPTBridge/internal/infra/trace"
 	"github.com/gin-gonic/gin"
@@ -18,27 +19,23 @@ import (
 
 // Router 负责注册对外 HTTP 路由并调用代理服务。
 type Router struct {
-	proxy      *proxyservice.ProxyService
-	billing    *walletservice.BillingService
-	auth       *userservice.AuthService
-	engine     *gin.Engine
-	dispatcher map[proxyOperation]proxyCaller
-	logger     *zap.Logger
+	gateway *proxygateway.Gateway
+	auth    *userservice.AuthService
+	engine  *gin.Engine
+	logger  *zap.Logger
 }
 
 // NewRouter 创建基于 Gin 的路由入口。
-func NewRouter(proxy *proxyservice.ProxyService, billing *walletservice.BillingService, auth *userservice.AuthService, logger *zap.Logger) http.Handler {
+func NewRouter(gateway *proxygateway.Gateway, auth *userservice.AuthService, logger *zap.Logger) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 
 	router := &Router{
-		proxy:   proxy,
-		billing: billing,
+		gateway: gateway,
 		auth:    auth,
 		engine:  gin.New(),
 		logger:  logger,
 	}
-	router.dispatcher = router.buildDispatchTable()
-	router.engine.Use(router.traceMiddleware(), router.sessionMiddleware(), router.billingMiddleware(), router.accessLogMiddleware(), gin.Recovery())
+	router.engine.Use(router.traceMiddleware(), router.sessionMiddleware(), router.accessLogMiddleware(), gin.Recovery())
 	router.registerRoutes()
 	return router.engine
 }
@@ -59,12 +56,7 @@ func (r *Router) registerRoutes() {
 
 // handleHealth 处理健康检查请求。
 func (r *Router) handleHealth(c *gin.Context) {
-	resp, err := r.proxy.Health(c.Request.Context(), c.Query("account_id"), c.Request.Header)
-	if err != nil {
-		writeError(c, http.StatusBadGateway, err)
-		return
-	}
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 // handleChatCompletions 处理聊天补全请求。
@@ -89,13 +81,7 @@ func (r *Router) handleImageEdits(c *gin.Context) {
 
 // handleModels 处理模型列表请求。
 func (r *Router) handleModels(c *gin.Context) {
-	models, err := r.proxy.Models(c.Request.Context(), c.Request.Header)
-	if err != nil {
-		writeError(c, http.StatusBadGateway, err)
-		return
-	}
-
-	c.Data(http.StatusOK, "application/json", models)
+	r.forwardToBridge(c, operationProxy)
 }
 
 // handleNoRoute 将未显式注册的 /v1 请求走通用代理。
@@ -117,27 +103,38 @@ func writeError(c *gin.Context, status int, err error) {
 	})
 }
 
+func writeGatewayError(c *gin.Context, err error) {
+	status := http.StatusBadGateway
+	switch {
+	case errors.Is(err, billingservice.ErrMissingAPIKey), errors.Is(err, billingservice.ErrInvalidAPIKey):
+		status = http.StatusUnauthorized
+	case errors.Is(err, billingservice.ErrDisabledAPIKey):
+		status = http.StatusForbidden
+	case errors.Is(err, billingservice.ErrInsufficientCredits):
+		status = http.StatusPaymentRequired
+	case errors.Is(err, proxygateway.ErrUpstreamQuotaExhausted), errors.Is(err, proxygateway.ErrStatefulUnavailable):
+		status = http.StatusServiceUnavailable
+	}
+	writeError(c, status, err)
+}
+
 // copyResponse 原样写回上游响应，并在响应结束后执行计费。
-func (r *Router) copyResponse(c *gin.Context, resp *http.Response, requestBody []byte) {
+func (r *Router) copyResponse(c *gin.Context, run *proxygateway.Run) {
+	resp := run.Response
 	for key, values := range resp.Header {
 		for _, value := range values {
 			c.Writer.Header().Add(key, value)
 		}
 	}
 	c.Status(resp.StatusCode)
+	if run.Features.RequestID != "" {
+		c.Writer.Header().Set(trace.HeaderRequestID, run.Features.RequestID)
+	}
 
 	var captured bytes.Buffer
-	_, _ = copyAndFlush(c.Writer, io.TeeReader(resp.Body, &captured))
-
-	if resp.StatusCode >= http.StatusBadRequest || r.billing == nil || !r.billing.Enabled() {
-		return
-	}
-	account, ok := walletservice.AccountFromContext(c.Request.Context())
-	if !ok {
-		return
-	}
-	if _, err := r.billing.Charge(c.Request.Context(), account, requestBody, captured.Bytes()); err != nil {
-		logging.WithContext(r.logger, c.Request.Context()).Error("请求计费失败", zap.Error(err))
+	_, copyErr := copyAndFlush(c.Writer, io.TeeReader(resp.Body, &captured))
+	if err := r.gateway.Finalize(c.Request.Context(), run, resp.StatusCode, captured.Bytes(), copyErr); err != nil {
+		r.logger.Error("请求结算失败", zap.Error(err))
 	}
 }
 
@@ -170,31 +167,6 @@ func (r *Router) sessionMiddleware() gin.HandlerFunc {
 			return
 		}
 		c.Request = c.Request.WithContext(userservice.WithCurrentUser(c.Request.Context(), user))
-		c.Next()
-	}
-}
-
-// billingMiddleware 校验平台 API Key，并把账号写入上下文。
-func (r *Router) billingMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if r.billing == nil || !r.billing.RequireAPIKey() || !strings.HasPrefix(c.Request.URL.Path, "/v1/") {
-			c.Next()
-			return
-		}
-
-		account, err := r.billing.Authenticate(c.Request.Header)
-		if err != nil {
-			status := http.StatusUnauthorized
-			if err == walletservice.ErrInsufficientBalance {
-				status = http.StatusPaymentRequired
-			}
-			writeError(c, status, err)
-			c.Abort()
-			return
-		}
-
-		c.Writer.Header().Set("X-Billing-Account", account.Name)
-		c.Request = c.Request.WithContext(walletservice.WithAccount(c.Request.Context(), account))
 		c.Next()
 	}
 }

@@ -1,9 +1,7 @@
 package handler
 
 import (
-	"fmt"
 	"io"
-	"net/http"
 
 	"GPTBridge/internal/domain/proxy/entity"
 	"GPTBridge/internal/infra/logging"
@@ -11,20 +9,25 @@ import (
 	"go.uber.org/zap"
 )
 
+// proxyOperation 表示当前支持的代理操作类型。
+type proxyOperation string
+
+const (
+	operationChatCompletion proxyOperation = "chat_completion"
+	operationResponse       proxyOperation = "response"
+	operationImageGenerate  proxyOperation = "image_generation"
+	operationImageEdit      proxyOperation = "image_edit"
+	operationProxy          proxyOperation = "proxy"
+)
+
 // forwardToBridge 读取请求体后按操作类型转发给 Rust 桥接服务。
 func (r *Router) forwardToBridge(c *gin.Context, operation proxyOperation) {
 	payload, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		writeError(c, http.StatusBadRequest, err)
+		writeError(c, 400, err)
 		return
 	}
 	defer c.Request.Body.Close()
-
-	caller, ok := r.dispatcher[operation]
-	if !ok {
-		writeError(c, http.StatusInternalServerError, fmt.Errorf("未找到操作 %s 对应的处理函数", operation))
-		return
-	}
 
 	logger := logging.WithContext(r.logger, c.Request.Context())
 	logger.Debug("开始转发请求",
@@ -32,7 +35,7 @@ func (r *Router) forwardToBridge(c *gin.Context, operation proxyOperation) {
 		zap.Int("payload_bytes", len(payload)),
 	)
 
-	resp, err := caller(c, entity.ProxyRequest{
+	run, err := r.gateway.Start(c.Request.Context(), entity.ProxyRequest{
 		Operation: string(operation),
 		Method:    c.Request.Method,
 		Path:      requestPath(c),
@@ -44,16 +47,16 @@ func (r *Router) forwardToBridge(c *gin.Context, operation proxyOperation) {
 			zap.String("operation", string(operation)),
 			zap.Error(err),
 		)
-		writeError(c, http.StatusBadGateway, err)
+		writeGatewayError(c, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer run.Response.Body.Close()
 
 	logger.Debug("转发请求成功",
 		zap.String("operation", string(operation)),
-		zap.Int("status", resp.StatusCode),
+		zap.Int("status", run.Response.StatusCode),
 	)
-	r.copyResponse(c, resp, payload)
+	r.copyResponse(c, run)
 }
 
 // requestPath 返回客户端原始请求路径。
